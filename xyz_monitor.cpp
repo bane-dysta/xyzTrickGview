@@ -18,6 +18,9 @@
 #undef ERROR
 #endif
 
+// 资源ID定义
+#define IDI_MAIN_ICON 101
+
 // 托盘和菜单常量
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_TRAY_ICON 1001
@@ -545,8 +548,14 @@ bool createTrayIcon(HWND hwnd) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     
-    // 使用系统默认应用程序图标
-    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    // 尝试加载自定义图标，如果失败则使用系统默认图标
+    g_nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_MAIN_ICON));
+    if (!g_nid.hIcon) {
+        LOG_WARNING("Failed to load custom icon, using default system icon");
+        g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    } else {
+        LOG_INFO("Loaded custom icon successfully");
+    }
     
     // 设置托盘提示文本
     strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "XYZ Monitor - Press hotkey to process clipboard");
@@ -566,7 +575,7 @@ void showTrayMenu(HWND hwnd, POINT pt) {
     HMENU hMenu = CreatePopupMenu();
     if (hMenu) {
         // 添加菜单项
-        AppendMenuA(hMenu, MF_STRING, ID_TRAY_ABOUT, "XYZ Monitor v1.0");
+        AppendMenuA(hMenu, MF_STRING, ID_TRAY_ABOUT, "XYZ Monitor v1.0 - by Bane Dysta");
         AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuA(hMenu, MF_STRING, ID_TRAY_RELOAD, "Reload Configuration");
         AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
@@ -593,12 +602,16 @@ void cleanupTrayIcon() {
 
 // 显示关于对话框
 void showAboutDialog(HWND hwnd) {
-    std::string message = "XYZ Monitor v1.0\n\n";
+    std::string message = "XYZ Monitor v1.0\n";
+    message += "Author: Bane Dysta\n\n";
     message += "Monitors clipboard for XYZ molecular data and opens in GView.\n\n";
     message += "Current Settings:\n";
     message += "Hotkey: " + g_config.hotkey + "\n";
     message += "GView Path: " + (g_config.gviewPath.empty() ? "Not configured" : g_config.gviewPath) + "\n";
     message += "Log Level: " + g_config.logLevel + "\n\n";
+    message += "Feedback:\n";
+    message += "GitHub: https://github.com/bane-dysta/xyzTrickGview\n";
+    message += "Forum: http://bbs.keinsci.com/forum.php?mod=viewthread&tid=55596&fromuid=63020\n\n";
     message += "Right-click tray icon for options.";
     
     MessageBoxA(hwnd, message.c_str(), "About XYZ Monitor", MB_OK | MB_ICONINFORMATION);
@@ -1158,6 +1171,11 @@ int main() {
         wc.lpfnWndProc = WindowProc;
         wc.hInstance = GetModuleHandle(NULL);
         wc.lpszClassName = "XYZMonitorClass";
+        // 设置窗口类图标
+        wc.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_MAIN_ICON));
+        if (!wc.hIcon) {
+            wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+        }
         
         if (!RegisterClassA(&wc)) {
             LOG_ERROR("Failed to register window class.");

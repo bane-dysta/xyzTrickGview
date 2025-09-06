@@ -5,4 +5,5 @@ temp/*
 *.zip
 *.log
 *.gjf
+*.o
 
