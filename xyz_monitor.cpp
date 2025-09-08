@@ -28,6 +28,10 @@
 #define ID_TRAY_EXIT 2002
 #define ID_TRAY_ABOUT 2003
 
+// 热键ID
+#define HOTKEY_XYZ_TO_GVIEW 1
+#define HOTKEY_GVIEW_TO_XYZ 2
+
 // 日志级别枚举
 enum class LogLevel {
     DEBUG = 0,
@@ -159,9 +163,11 @@ Logger g_logger;
 // 配置结构体
 struct Config {
     std::string hotkey = "CTRL+SHIFT+V";
+    std::string hotkeyReverse = "CTRL+SHIFT+G";  // 新增：反向转换热键
     std::string gviewPath = "";
     std::string tempDir = "";
     std::string logFile = "logs/xyz_monitor.log";
+    std::string gaussianClipboardPath = "";  // 新增：Gaussian clipboard文件路径
     int waitSeconds = 5;
     std::string logLevel = "INFO";
     bool logToConsole = true;
@@ -193,7 +199,6 @@ struct DeleteFileThreadParams {
 Config g_config;
 HHOOK g_hHook = NULL;
 bool g_running = true;
-const int HOTKEY_ID = 1;
 NOTIFYICONDATAA g_nid = {};
 HWND g_hwnd = NULL;
 
@@ -213,23 +218,30 @@ std::map<std::string, int> atomicNumbers = {
     {"Rg", 111}, {"Cn", 112}, {"Nh", 113}, {"Fl", 114}, {"Mc", 115}, {"Lv", 116}, {"Ts", 117}, {"Og", 118}
 };
 
+// 新增：原子序数到元素符号的映射
+std::map<int, std::string> atomicNumberToSymbol = {
+    {1, "H"}, {2, "He"}, {3, "Li"}, {4, "Be"}, {5, "B"}, {6, "C"}, {7, "N"}, {8, "O"},
+    {9, "F"}, {10, "Ne"}, {11, "Na"}, {12, "Mg"}, {13, "Al"}, {14, "Si"}, {15, "P"}, {16, "S"},
+    {17, "Cl"}, {18, "Ar"}, {19, "K"}, {20, "Ca"}, {21, "Sc"}, {22, "Ti"}, {23, "V"}, {24, "Cr"},
+    {25, "Mn"}, {26, "Fe"}, {27, "Co"}, {28, "Ni"}, {29, "Cu"}, {30, "Zn"}, {31, "Ga"}, {32, "Ge"},
+    {33, "As"}, {34, "Se"}, {35, "Br"}, {36, "Kr"}, {37, "Rb"}, {38, "Sr"}, {39, "Y"}, {40, "Zr"},
+    {41, "Nb"}, {42, "Mo"}, {43, "Tc"}, {44, "Ru"}, {45, "Rh"}, {46, "Pd"}, {47, "Ag"}, {48, "Cd"},
+    {49, "In"}, {50, "Sn"}, {51, "Sb"}, {52, "Te"}, {53, "I"}, {54, "Xe"}, {55, "Cs"}, {56, "Ba"},
+    {57, "La"}, {58, "Ce"}, {59, "Pr"}, {60, "Nd"}, {61, "Pm"}, {62, "Sm"}, {63, "Eu"}, {64, "Gd"},
+    {65, "Tb"}, {66, "Dy"}, {67, "Ho"}, {68, "Er"}, {69, "Tm"}, {70, "Yb"}, {71, "Lu"}, {72, "Hf"},
+    {73, "Ta"}, {74, "W"}, {75, "Re"}, {76, "Os"}, {77, "Ir"}, {78, "Pt"}, {79, "Au"}, {80, "Hg"},
+    {81, "Tl"}, {82, "Pb"}, {83, "Bi"}, {84, "Po"}, {85, "At"}, {86, "Rn"}
+};
+
 // 前置声明
 bool reloadConfiguration();
 void cleanupTrayIcon();
 
 size_t calculateMaxChars(int memoryMB) {
-    // 内存使用估算（每字符约需要6-8字节总内存）：
-    // - 原始文本: 1字节/字符
-    // - 解析数据结构: 约0.5字节/字符（每100字符约1个原子，50字节/原子）
-    // - 转换后Gaussian格式: 2-3字节/字符
-    // - 其他开销: 1-2字节/字符
-    // 总计：约6字节/字符，为安全起见用8字节
-    
     const int BYTES_PER_CHAR = 8;
     size_t totalBytes = static_cast<size_t>(memoryMB) * 1024 * 1024;
     size_t maxChars = totalBytes / BYTES_PER_CHAR;
     
-    // 设置合理的最小值和最大值
     const size_t MIN_CHARS = 10000;      // 最少1万字符
     const size_t MAX_CHARS = 100000000;  // 最多1亿字符
     
@@ -290,10 +302,8 @@ LogLevel stringToLogLevel(const std::string& levelStr) {
 // 获取原子序数
 int getAtomicNumber(const std::string& symbol) {
     std::string processed = symbol;
-    // 去除首尾空格
     processed = trim(processed);
     
-    // 首字母大写，其余小写
     if (!processed.empty()) {
         processed[0] = std::toupper(processed[0]);
         for (size_t i = 1; i < processed.length(); ++i) {
@@ -310,10 +320,8 @@ DWORD WINAPI DeleteFileThread(LPVOID lpParam) {
     DeleteFileThreadParams* params = static_cast<DeleteFileThreadParams*>(lpParam);
     
     try {
-        // 等待指定时间
         Sleep(params->waitSeconds * 1000);
         
-        // 尝试删除文件
         if (DeleteFileA(params->filepath.c_str())) {
             // 成功删除
         } else {
@@ -326,7 +334,6 @@ DWORD WINAPI DeleteFileThread(LPVOID lpParam) {
         std::cerr << "Unknown exception in delete file thread" << std::endl;
     }
     
-    // 释放参数内存
     delete params;
     return 0;
 }
@@ -339,7 +346,9 @@ bool loadConfig(const std::string& configFile) {
         std::ofstream outFile(configFile);
         if (outFile.is_open()) {
             outFile << "hotkey=CTRL+SHIFT+V\n";
+            outFile << "hotkey_reverse=CTRL+SHIFT+G\n";
             outFile << "gview_path=gview.exe\n";
+            outFile << "gaussian_clipboard_path=Clipboard.frg\n";
             outFile << "temp_dir=temp\n";
             outFile << "log_file=logs/xyz_monitor.log\n";
             outFile << "log_level=INFO\n";
@@ -370,8 +379,12 @@ bool loadConfig(const std::string& configFile) {
             try {
                 if (key == "hotkey") {
                     g_config.hotkey = value;
+                } else if (key == "hotkey_reverse") {
+                    g_config.hotkeyReverse = value;
                 } else if (key == "gview_path") {
                     g_config.gviewPath = value;
+                } else if (key == "gaussian_clipboard_path") {
+                    g_config.gaussianClipboardPath = value;
                 } else if (key == "temp_dir") {
                     g_config.tempDir = value;
                 } else if (key == "log_file") {
@@ -401,7 +414,6 @@ bool loadConfig(const std::string& configFile) {
     }
     file.close();
     
-    // 如果没有设置字符限制或设置为0，则根据内存自动计算
     if (g_config.maxClipboardChars == 0) {
         g_config.maxClipboardChars = calculateMaxChars(g_config.maxMemoryMB);
     }
@@ -469,23 +481,36 @@ bool parseHotkey(const std::string& hotkeyStr, UINT& modifiers, UINT& vk) {
 }
 
 // 重新注册热键
-bool reregisterHotkey() {
+bool reregisterHotkeys() {
     if (g_hwnd) {
         // 先注销旧热键
-        UnregisterHotKey(g_hwnd, HOTKEY_ID);
+        UnregisterHotKey(g_hwnd, HOTKEY_XYZ_TO_GVIEW);
+        UnregisterHotKey(g_hwnd, HOTKEY_GVIEW_TO_XYZ);
         
-        // 注册新热键
+        // 注册主热键（XYZ到GView）
         UINT modifiers, vk;
         if (parseHotkey(g_config.hotkey, modifiers, vk)) {
-            if (RegisterHotKey(g_hwnd, HOTKEY_ID, modifiers, vk)) {
-                LOG_INFO("Hotkey re-registered: " + g_config.hotkey);
-                return true;
+            if (RegisterHotKey(g_hwnd, HOTKEY_XYZ_TO_GVIEW, modifiers, vk)) {
+                LOG_INFO("Primary hotkey registered: " + g_config.hotkey);
             } else {
                 DWORD error = GetLastError();
-                LOG_ERROR("Failed to re-register hotkey: " + g_config.hotkey + " (Error: " + std::to_string(error) + ")");
+                LOG_ERROR("Failed to register primary hotkey: " + g_config.hotkey + " (Error: " + std::to_string(error) + ")");
                 return false;
             }
         }
+        
+        // 注册反向热键（GView到XYZ）
+        if (parseHotkey(g_config.hotkeyReverse, modifiers, vk)) {
+            if (RegisterHotKey(g_hwnd, HOTKEY_GVIEW_TO_XYZ, modifiers, vk)) {
+                LOG_INFO("Reverse hotkey registered: " + g_config.hotkeyReverse);
+            } else {
+                DWORD error = GetLastError();
+                LOG_ERROR("Failed to register reverse hotkey: " + g_config.hotkeyReverse + " (Error: " + std::to_string(error) + ")");
+                // 主热键已注册，不返回false
+            }
+        }
+        
+        return true;
     }
     return false;
 }
@@ -495,13 +520,12 @@ bool reloadConfiguration() {
     LOG_INFO("Reloading configuration...");
     
     try {
-        // 保存旧配置用于比较
         std::string oldHotkey = g_config.hotkey;
+        std::string oldHotkeyReverse = g_config.hotkeyReverse;
         std::string oldLogLevel = g_config.logLevel;
         bool oldLogToConsole = g_config.logToConsole;
         bool oldLogToFile = g_config.logToFile;
         
-        // 重新加载配置
         if (!loadConfig("config.ini")) {
             LOG_WARNING("Failed to reload config file, using existing configuration");
             return false;
@@ -525,9 +549,9 @@ bool reloadConfiguration() {
         }
         
         // 如果热键改变了，重新注册
-        if (oldHotkey != g_config.hotkey) {
-            if (reregisterHotkey()) {
-                LOG_INFO("Hotkey changed from '" + oldHotkey + "' to '" + g_config.hotkey + "'");
+        if (oldHotkey != g_config.hotkey || oldHotkeyReverse != g_config.hotkeyReverse) {
+            if (reregisterHotkeys()) {
+                LOG_INFO("Hotkeys re-registered successfully");
             }
         }
         
@@ -548,7 +572,6 @@ bool createTrayIcon(HWND hwnd) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     
-    // 尝试加载自定义图标，如果失败则使用系统默认图标
     g_nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_MAIN_ICON));
     if (!g_nid.hIcon) {
         LOG_WARNING("Failed to load custom icon, using default system icon");
@@ -557,8 +580,7 @@ bool createTrayIcon(HWND hwnd) {
         LOG_INFO("Loaded custom icon successfully");
     }
     
-    // 设置托盘提示文本
-    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "XYZ Monitor - Press hotkey to process clipboard");
+    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "XYZ Monitor - XYZ<->GView Bridge");
     
     bool result = Shell_NotifyIconA(NIM_ADD, &g_nid);
     if (result) {
@@ -574,17 +596,14 @@ bool createTrayIcon(HWND hwnd) {
 void showTrayMenu(HWND hwnd, POINT pt) {
     HMENU hMenu = CreatePopupMenu();
     if (hMenu) {
-        // 添加菜单项
-        AppendMenuA(hMenu, MF_STRING, ID_TRAY_ABOUT, "XYZ Monitor v1.0 - by Bane Dysta");
+        AppendMenuA(hMenu, MF_STRING, ID_TRAY_ABOUT, "XYZ Monitor v1.1 - by Bane Dysta");
         AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuA(hMenu, MF_STRING, ID_TRAY_RELOAD, "Reload Configuration");
         AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuA(hMenu, MF_STRING, ID_TRAY_EXIT, "Exit");
         
-        // 设置默认项
         SetMenuDefaultItem(hMenu, ID_TRAY_ABOUT, FALSE);
         
-        // 显示菜单
         SetForegroundWindow(hwnd);
         TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
         
@@ -602,12 +621,14 @@ void cleanupTrayIcon() {
 
 // 显示关于对话框
 void showAboutDialog(HWND hwnd) {
-    std::string message = "XYZ Monitor v1.0\n";
+    std::string message = "XYZ Monitor v1.1\n";
     message += "Author: Bane Dysta\n\n";
-    message += "Monitors clipboard for XYZ molecular data and opens in GView.\n\n";
+    message += "Bidirectional XYZ <-> GView converter.\n\n";
     message += "Current Settings:\n";
-    message += "Hotkey: " + g_config.hotkey + "\n";
+    message += "XYZ->GView: " + g_config.hotkey + "\n";
+    message += "GView->XYZ: " + g_config.hotkeyReverse + "\n";
     message += "GView Path: " + (g_config.gviewPath.empty() ? "Not configured" : g_config.gviewPath) + "\n";
+    message += "Gaussian Clipboard: " + (g_config.gaussianClipboardPath.empty() ? "Not configured" : g_config.gaussianClipboardPath) + "\n";
     message += "Log Level: " + g_config.logLevel + "\n\n";
     message += "Feedback:\n";
     message += "GitHub: https://github.com/bane-dysta/xyzTrickGview\n";
@@ -652,17 +673,161 @@ std::string getClipboardText() {
     }
 }
 
+// 新增：写入剪贴板
+bool writeToClipboard(const std::string& text) {
+    try {
+        if (!OpenClipboard(NULL)) {
+            LOG_ERROR("Cannot open clipboard for writing");
+            return false;
+        }
+        
+        EmptyClipboard();
+        
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, text.length() + 1);
+        if (hMem == NULL) {
+            LOG_ERROR("Cannot allocate memory for clipboard");
+            CloseClipboard();
+            return false;
+        }
+        
+        char* pMem = static_cast<char*>(GlobalLock(hMem));
+        if (pMem == NULL) {
+            LOG_ERROR("Cannot lock memory for clipboard");
+            GlobalFree(hMem);
+            CloseClipboard();
+            return false;
+        }
+        
+        strcpy_s(pMem, text.length() + 1, text.c_str());
+        GlobalUnlock(hMem);
+        
+        if (SetClipboardData(CF_TEXT, hMem) == NULL) {
+            LOG_ERROR("Cannot set clipboard data");
+            GlobalFree(hMem);
+            CloseClipboard();
+            return false;
+        }
+        
+        CloseClipboard();
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception writing to clipboard: " + std::string(e.what()));
+        return false;
+    }
+}
+
+// 新增：解析Gaussian clipboard文件
+std::vector<Atom> parseGaussianClipboard(const std::string& filename) {
+    std::vector<Atom> atoms;
+    
+    try {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            LOG_ERROR("Cannot open Gaussian clipboard file: " + filename);
+            return atoms;
+        }
+        
+        std::string line;
+        
+        // 跳过第一行（头部）
+        if (!std::getline(file, line)) {
+            LOG_ERROR("Empty file or cannot read header");
+            return atoms;
+        }
+        
+        // 读取原子数量
+        if (!std::getline(file, line)) {
+            LOG_ERROR("Cannot read number of atoms");
+            return atoms;
+        }
+        
+        int numAtoms;
+        try {
+            numAtoms = std::stoi(line);
+            LOG_DEBUG("Expected number of atoms: " + std::to_string(numAtoms));
+        } catch (const std::exception& e) {
+            LOG_ERROR("Cannot parse number of atoms: " + line);
+            return atoms;
+        }
+        
+        // 读取原子数据
+        for (int i = 0; i < numAtoms; i++) {
+            if (!std::getline(file, line)) {
+                LOG_WARNING("Expected " + std::to_string(numAtoms) + " atoms, but only found " + std::to_string(i));
+                break;
+            }
+            
+            std::istringstream iss(line);
+            int atomicNumber;
+            double x, y, z;
+            std::string label;
+            
+            if (iss >> atomicNumber >> x >> y >> z) {
+                // 可选的标签
+                iss >> label;
+                
+                auto it = atomicNumberToSymbol.find(atomicNumber);
+                if (it != atomicNumberToSymbol.end()) {
+                    Atom atom;
+                    atom.symbol = it->second;
+                    atom.x = x;
+                    atom.y = y;
+                    atom.z = z;
+                    atoms.push_back(atom);
+                    
+                    LOG_DEBUG("Added atom " + std::to_string(i + 1) + ": " + atom.symbol + 
+                             " (" + std::to_string(atomicNumber) + ") at (" + 
+                             std::to_string(atom.x) + ", " + std::to_string(atom.y) + ", " + std::to_string(atom.z) + ")");
+                } else {
+                    LOG_WARNING("Unknown atomic number " + std::to_string(atomicNumber) + " in line: " + line);
+                }
+            } else {
+                LOG_WARNING("Cannot parse atom data in line: " + line);
+            }
+        }
+        
+        file.close();
+        LOG_INFO("Parsed " + std::to_string(atoms.size()) + " atoms from Gaussian clipboard");
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception parsing Gaussian clipboard: " + std::string(e.what()));
+    }
+    
+    return atoms;
+}
+
+// 新增：创建XYZ字符串
+std::string createXYZString(const std::vector<Atom>& atoms) {
+    try {
+        std::ostringstream oss;
+        
+        oss << atoms.size() << std::endl;
+        oss << "Converted from Gaussian clipboard" << std::endl;
+        
+        for (const auto& atom : atoms) {
+            oss << std::left << std::setw(2) << atom.symbol 
+                << " " << std::right << std::setw(12) << std::fixed << std::setprecision(6) << atom.x
+                << " " << std::right << std::setw(12) << std::fixed << std::setprecision(6) << atom.y
+                << " " << std::right << std::setw(12) << std::fixed << std::setprecision(6) << atom.z
+                << std::endl;
+        }
+        
+        return oss.str();
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception creating XYZ string: " + std::string(e.what()));
+        return "";
+    }
+}
+
 // 检查是否为有效的坐标行
 bool isValidCoordinateLine(const std::string& line) {
     std::vector<std::string> parts = splitWhitespace(line);
     if (parts.size() < 4) return false;
     
-    // 检查是否有有效的数字坐标
     try {
         double x = std::stod(parts[1]);
         double y = std::stod(parts[2]);
         double z = std::stod(parts[3]);
-        (void)x; (void)y; (void)z; // 避免未使用变量警告
+        (void)x; (void)y; (void)z;
         return true;
     } catch (const std::exception&) {
         return false;
@@ -673,7 +838,6 @@ bool isValidCoordinateLine(const std::string& line) {
 bool isSimplifiedXYZFormat(const std::vector<std::string>& lines) {
     if (lines.empty()) return false;
     
-    // 检查前几行是否都符合坐标格式
     size_t maxCheck = std::min(static_cast<size_t>(5), lines.size());
     for (size_t i = 0; i < maxCheck; ++i) {
         if (!isValidCoordinateLine(lines[i])) {
@@ -692,7 +856,6 @@ bool isXYZFormat(const std::string& content) {
             return false;
         }
         
-        // 检查是否包含二进制数据
         if (content.find('\0') != std::string::npos) {
             LOG_DEBUG("Content contains binary data");
             return false;
@@ -708,13 +871,11 @@ bool isXYZFormat(const std::string& content) {
         try {
             int atomCount = std::stoi(lines[0]);
             if (atomCount > 0 && atomCount <= 10000) {
-                // 检查是否有足够的坐标行
                 if (lines.size() < static_cast<size_t>(atomCount + 2)) {
                     LOG_DEBUG("Not enough lines for atom count: " + std::to_string(atomCount));
                     return false;
                 }
                 
-                // 验证前几行的坐标格式
                 size_t maxCheck = std::min(static_cast<size_t>(5), static_cast<size_t>(atomCount));
                 for (size_t i = 0; i < maxCheck; ++i) {
                     if (i + 2 < lines.size()) {
@@ -728,11 +889,9 @@ bool isXYZFormat(const std::string& content) {
                 return true;
             }
         } catch (const std::exception&) {
-            // 不是数字，检查是否是简化XYZ格式
             LOG_DEBUG("First line is not atom count, checking simplified format");
         }
         
-        // 检查是否是简化XYZ格式（直接坐标行）
         bool isSimplified = isSimplifiedXYZFormat(lines);
         if (isSimplified) {
             LOG_DEBUG("Detected simplified XYZ format");
@@ -797,7 +956,6 @@ std::vector<Frame> readMultiXYZ(const std::string& content) {
             return frames;
         }
         
-        // 检查是否是简化格式
         try {
             std::stoi(lines[0]);
             // 标准格式
@@ -914,15 +1072,12 @@ std::string convertToGaussianLog(const std::vector<Frame>& frames) {
     try {
         std::ostringstream oss;
         
-        // 写入头部
         oss << writeGaussianLogHeader();
         
-        // 为每一帧写入几何结构
         for (size_t i = 0; i < frames.size(); ++i) {
             oss << writeGaussianLogGeometry(frames[i], static_cast<int>(i + 1));
         }
         
-        // 写入尾部
         oss << writeGaussianLogFooter();
         
         LOG_DEBUG("Converted " + std::to_string(frames.size()) + " frames to Gaussian log format");
@@ -936,19 +1091,16 @@ std::string convertToGaussianLog(const std::vector<Frame>& frames) {
 // 创建临时文件
 std::string createTempFile(const std::string& content) {
     try {
-        // 确保临时目录存在
         if (!g_config.tempDir.empty()) {
             std::filesystem::create_directories(g_config.tempDir);
         }
         
-        // 生成临时文件名
         std::time_t t = std::time(nullptr);
         std::ostringstream filename;
         filename << "molecule_" << t << ".log";
         
         std::string filepath = g_config.tempDir.empty() ? filename.str() : g_config.tempDir + "/" + filename.str();
         
-        // 写入文件
         std::ofstream file(filepath);
         if (!file.is_open()) {
             LOG_ERROR("Failed to create temp file: " + filepath);
@@ -992,14 +1144,13 @@ bool openWithGView(const std::string& filepath) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
         
-        // 使用 Windows API 创建线程来延时删除文件
         DeleteFileThreadParams* params = new DeleteFileThreadParams;
         params->filepath = filepath;
         params->waitSeconds = g_config.waitSeconds;
         
         HANDLE hThread = CreateThread(NULL, 0, DeleteFileThread, params, 0, NULL);
         if (hThread) {
-            CloseHandle(hThread); // 我们不需要等待这个线程
+            CloseHandle(hThread);
         } else {
             DWORD error = GetLastError();
             LOG_ERROR("Failed to create delete thread (Error: " + std::to_string(error) + ")");
@@ -1014,9 +1165,9 @@ bool openWithGView(const std::string& filepath) {
     }
 }
 
-// 处理剪贴板内容
-void processClipboard() {
-    LOG_INFO("Processing clipboard...");
+// 处理剪贴板内容（XYZ到GView）
+void processClipboardXYZToGView() {
+    LOG_INFO("Processing clipboard (XYZ to GView)...");
     
     try {
         std::string content = getClipboardText();
@@ -1025,7 +1176,6 @@ void processClipboard() {
             return;
         }
         
-        // 使用配置的字符限制
         if (content.length() > g_config.maxClipboardChars) {
             LOG_WARNING("Clipboard content is too large (" + std::to_string(content.length()) + 
                        " characters). Limit is " + std::to_string(g_config.maxClipboardChars) + 
@@ -1038,7 +1188,6 @@ void processClipboard() {
             return;
         }
         
-        // 显示内存使用信息
         double estimatedMemoryMB = (content.length() * 8.0) / (1024.0 * 1024.0);
         LOG_INFO("Processing " + std::to_string(content.length()) + " characters (estimated " + 
                 std::to_string(static_cast<int>(estimatedMemoryMB)) + "MB memory usage)");
@@ -1068,15 +1217,57 @@ void processClipboard() {
             LOG_INFO("Opened with GView successfully.");
         } else {
             LOG_ERROR("Failed to open with GView.");
-            // 尝试删除临时文件
             if (!DeleteFileA(tempFile.c_str())) {
                 LOG_ERROR("Failed to cleanup temp file: " + tempFile);
             }
         }
     } catch (const std::exception& e) {
-        LOG_ERROR("Exception in processClipboard: " + std::string(e.what()));
+        LOG_ERROR("Exception in processClipboardXYZToGView: " + std::string(e.what()));
     } catch (...) {
-        LOG_ERROR("Unknown exception in processClipboard");
+        LOG_ERROR("Unknown exception in processClipboardXYZToGView");
+    }
+}
+
+// 新增：处理GView clipboard到XYZ
+void processGViewClipboardToXYZ() {
+    LOG_INFO("Processing GView clipboard to XYZ...");
+    
+    try {
+        if (g_config.gaussianClipboardPath.empty()) {
+            LOG_ERROR("Gaussian clipboard path not configured!");
+            return;
+        }
+        
+        // 解析Gaussian clipboard文件
+        std::vector<Atom> atoms = parseGaussianClipboard(g_config.gaussianClipboardPath);
+        
+        if (atoms.empty()) {
+            LOG_ERROR("No atoms found in Gaussian clipboard file");
+            LOG_INFO("Make sure you have copied a molecule in Gaussian and the path is correct.");
+            return;
+        }
+        
+        LOG_INFO("SUCCESS: Parsed " + std::to_string(atoms.size()) + " atoms");
+        
+        // 创建XYZ字符串
+        std::string xyzString = createXYZString(atoms);
+        
+        if (xyzString.empty()) {
+            LOG_ERROR("Failed to create XYZ string");
+            return;
+        }
+        
+        // 写入剪贴板
+        if (writeToClipboard(xyzString)) {
+            LOG_INFO("SUCCESS: XYZ data written to clipboard!");
+            LOG_DEBUG("XYZ content preview (first 200 chars): " + xyzString.substr(0, 200) + "...");
+        } else {
+            LOG_ERROR("Failed to write to clipboard");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception in processGViewClipboardToXYZ: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("Unknown exception in processGViewClipboardToXYZ");
     }
 }
 
@@ -1085,20 +1276,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     try {
         switch (uMsg) {
             case WM_HOTKEY:
-                if (wParam == HOTKEY_ID) {
-                    processClipboard();
+                if (wParam == HOTKEY_XYZ_TO_GVIEW) {
+                    processClipboardXYZToGView();
+                } else if (wParam == HOTKEY_GVIEW_TO_XYZ) {
+                    processGViewClipboardToXYZ();
                 }
                 return 0;
                 
             case WM_TRAYICON:
                 switch (lParam) {
                     case WM_LBUTTONDBLCLK:
-                        // 双击托盘图标显示关于对话框
                         showAboutDialog(hwnd);
                         break;
                         
                     case WM_RBUTTONUP:
-                        // 右键点击显示菜单
                         POINT pt;
                         GetCursorPos(&pt);
                         showTrayMenu(hwnd, pt);
@@ -1142,10 +1333,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
 int main() {
     try {
-        // 首先加载配置以获取日志设置
         loadConfig("config.ini");
         
-        // 初始化日志系统
         LogLevel logLevel = stringToLogLevel(g_config.logLevel);
         if (!g_logger.initialize(g_config.logFile, logLevel)) {
             std::cerr << "Warning: Failed to initialize log file, logging to console only." << std::endl;
@@ -1154,11 +1343,13 @@ int main() {
         g_logger.setLogToConsole(g_config.logToConsole);
         g_logger.setLogToFile(g_config.logToFile);
         
-        LOG_INFO("XYZ Monitor starting...");
+        LOG_INFO("XYZ Monitor v1.1 starting...");
         
         LOG_INFO("Configuration:");
-        LOG_INFO("  Hotkey: " + g_config.hotkey);
+        LOG_INFO("  XYZ->GView Hotkey: " + g_config.hotkey);
+        LOG_INFO("  GView->XYZ Hotkey: " + g_config.hotkeyReverse);
         LOG_INFO("  GView Path: " + g_config.gviewPath);
+        LOG_INFO("  Gaussian Clipboard: " + g_config.gaussianClipboardPath);
         LOG_INFO("  Temp Dir: " + g_config.tempDir);
         LOG_INFO("  Log File: " + g_config.logFile);
         LOG_INFO("  Log Level: " + g_config.logLevel);
@@ -1171,7 +1362,6 @@ int main() {
         wc.lpfnWndProc = WindowProc;
         wc.hInstance = GetModuleHandle(NULL);
         wc.lpszClassName = "XYZMonitorClass";
-        // 设置窗口类图标
         wc.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_MAIN_ICON));
         if (!wc.hIcon) {
             wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
@@ -1192,26 +1382,19 @@ int main() {
             return 1;
         }
         
-        // 创建系统托盘图标
         if (!createTrayIcon(g_hwnd)) {
             LOG_WARNING("Failed to create tray icon, continuing without it");
         }
         
         // 注册全局热键
-        UINT modifiers, vk;
-        if (!parseHotkey(g_config.hotkey, modifiers, vk)) {
-            LOG_ERROR("Invalid hotkey format: " + g_config.hotkey);
-            return 1;
-        }
-        
-        if (!RegisterHotKey(g_hwnd, HOTKEY_ID, modifiers, vk)) {
-            DWORD error = GetLastError();
-            LOG_ERROR("Failed to register hotkey: " + g_config.hotkey + " (Error: " + std::to_string(error) + ")");
+        if (!reregisterHotkeys()) {
+            LOG_ERROR("Failed to register hotkeys");
             return 1;
         }
         
         LOG_INFO("XYZ Monitor is running. Check system tray for options.");
-        LOG_INFO("Press " + g_config.hotkey + " to process clipboard.");
+        LOG_INFO("Press " + g_config.hotkey + " to convert clipboard XYZ to GView.");
+        LOG_INFO("Press " + g_config.hotkeyReverse + " to convert GView clipboard to XYZ.");
         
         // 消息循环
         MSG msg;
@@ -1221,7 +1404,8 @@ int main() {
         }
         
         // 清理
-        UnregisterHotKey(g_hwnd, HOTKEY_ID);
+        UnregisterHotKey(g_hwnd, HOTKEY_XYZ_TO_GVIEW);
+        UnregisterHotKey(g_hwnd, HOTKEY_GVIEW_TO_XYZ);
         cleanupTrayIcon();
         DestroyWindow(g_hwnd);
         
